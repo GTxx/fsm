@@ -16,15 +16,18 @@ Copyright 2010 VendAsta Technologies Inc.
    See the License for the specific language governing permissions and
    limitations under the License.
 """
-from fantasm.exceptions import TRANSIENT_ERRORS, HaltMachineError
+#from state import State
+#from exceptions import  HaltMachineError 
+from hxfsm.exceptions import HaltMachineError
 
 class Transition(object):
     """ A transition object for a machine. """
 
-    def __init__(self, name, source, target, action=None, countdown=0, retryOptions=None, queueName=None, taskTarget=None):
+    def __init__(self, name, source, target, event, action=None):
         """ Constructor
 
         @param name: the name of the Transition instance
+        @param source: a State instance
         @param target: a State instance
         @param action: the optional action for a state
         @param countdown: the number of seconds to wait before firing this transition. Default 0.
@@ -32,20 +35,17 @@ class Transition(object):
         @param queueName: the name of the queue to Queue into
         @param taskTarget: the target for tasks created for this transition
         """
-        assert queueName
+
 
         self.source = source
         self.target = target
+        self.event = event
         self.name = name
         self.action = action
-        self.countdown = countdown
-        self.retryOptions = retryOptions
-        self.queueName = queueName
-        self.taskTarget = taskTarget
 
     # W0613:144:Transition.execute: Unused argument 'obj'
     # args are present for a future(?) transition action
-    def execute(self, context, obj): # pylint: disable-msg=W0613
+    #def execute(self, context, obj): # pylint: disable-msg=W0613
         """ Moves the machine to the next state.
 
         @param context: an FSMContext instance
@@ -54,6 +54,7 @@ class Transition(object):
         Notes: This function has side effect and changes context
 
         """
+        '''
         if self.action:
             try:
                 self.action.execute(context, obj)
@@ -67,3 +68,4 @@ class Transition(object):
                       context.machineName, self.name, self.action.__class__)
                 raise
         context.currentState = self.target
+'''

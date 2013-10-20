@@ -36,223 +36,64 @@ else:
 
 import pickle
 
-from fantasm import constants, config
-from fantasm.log import Logger
-from fantasm.state import State
-from fantasm.transition import Transition
-from fantasm.exceptions import UnknownEventError, UnknownStateError, UnknownMachineError, TRANSIENT_ERRORS, \
+from hxfsm.state        import State
+from hxfsm.transition   import Transition
+from hxfsm              import constants
+from hxfsm.exceptions   import UnknownEventError, UnknownStateError, UnknownMachineError, \
                                HaltMachineError
-from fantasm.models import _FantasmFanIn, _FantasmInstance
-from fantasm import models
-from fantasm.utils import knuthHash
-from fantasm.lock import ReadWriteLock, RunOnceSemaphore
-
-from hxfsm import FSMContext
 
 class FSM(object):
-    """ An FSMContext creation factory. This is primarily responsible for translating machine
+    """ An FSM creation factory. This is primarily responsible for translating machine
     configuration information (config.currentConfiguration()) into singleton States and Transitions as per [1]
     """
 
-    PSEUDO_INIT     = 'pseudo-init'
-    PSEUDO_FINAL    = 'pseudo-final'
+    FSM_INIT_STATE  = 'fsm-init-state'
+    machines        = {}
 
-    _CURRENT_CONFIG = None
-    _MACHINES       = None
-    _PSEUDO_INITS   = None
-    _PSEUDO_FINALS  = None
+    def __init__(self, machineName, statesList, transList):
+        """ Constructor which either initializes Finite States Machine
 
-    def __init__(self, currentConfig=None):
-        """ Constructor which either initializes the module/class-level cache, or simply uses it
+        @param machineName  : FSM  machine name, must be unique
+        @param statesList   : all states in FSM machine
+        @param transList    : all transition in FSM machine
 
-        @param currentConfig: a config._Configuration instance (dependency injection). if None,
-            then the factory uses config.currentConfiguration()
         """
-        # Fantasm use YAML to describe FSM, hxfsm use json to describe FSM 
-        currentConfig = currentConfig or config.currentConfiguration()
-
-        # if the FSM is not using the currentConfig (.yaml was edited etc.)
-        # no need to store current config, it's ugly
-        if not (FSM._CURRENT_CONFIG is currentConfig):
-            self._init(currentConfig=currentConfig)
-            FSM._CURRENT_CONFIG = self.config
-            FSM._MACHINES = self.machines
-            FSM._PSEUDO_INITS = self.pseudoInits
-            FSM._PSEUDO_FINALS = self.pseudoFinals
-
-        # otherwise simply use the cached currentConfig etc.
-        # 
-        else:
-            self.config = FSM._CURRENT_CONFIG
-            self.machines = FSM._MACHINES
-            self.pseudoInits = FSM._PSEUDO_INITS
-            self.pseudoFinals = FSM._PSEUDO_FINALS
-
-    def __init__(self, FSMDict):
-        """ Constructor which either initializes the module/class-level cache, or simply uses it
-
-        @param currentConfig: a config._Configuration instance (dependency injection). if None,
-            then the factory uses config.currentConfiguration()
-        """
-        # Fantasm use YAML to describe FSM, hxfsm use json to describe FSM 
         import logging
-        if FSM.machines[FSMDict['name']]:
-            logging.info("FSM name " + FSMDict['name'] + "already used!")
+        logging.info("Initializing FSM machine.")                
+
+        # FSM machine name must be unique!
+        if machineName in FSM.machines:
+            logging.info("FSM name " + machineName + "already used!")
             return
 
+        # Use dict to store a FSM machine, it typically looks like as below
+        # machine looks like {'states'      : {'stateName1': stateObj1,
+        #                                      'stateName2': stateObj2},
+        #                     'transitions' : {'transitionName1': transObj1,
+        #                                      'transitionName2': transObj2}}
+        FSM.machines[machineName] = {constants.MACHINE_STATES_ATTRIBUTE: {}, constants.MACHINE_TRANSITIONS_ATTRIBUTE: {}}
+        machine         = FSM.machines[machineName]
+        machineStates   = machine[constants.MACHINE_STATES_ATTRIBUTE]
+        machineTrans    = machine[constants.MACHINE_TRANSITIONS_ATTRIBUTE]
 
-        # if the FSM is not using the currentConfig (.yaml was edited etc.)
-        # no need to store current config, it's ugly
-        if not (FSM._CURRENT_CONFIG is currentConfig):
-            self._init(currentConfig=currentConfig)
-            FSM._CURRENT_CONFIG = self.config
-            FSM._MACHINES = self.machines
-            FSM._PSEUDO_INITS = self.pseudoInits
-            FSM._PSEUDO_FINALS = self.pseudoFinals
+        # add states to FSM.machines
+        def _addState(state):
+            # mark the initial state
+            if state.isInitialState:
+                machineStates[FSM.FSM_INIT_STATE] = state
+            if state.name == FSM.FSM_INIT_STATE:
+                logging.info("state name should not be %s.", FSM.FSM_INIT_STATE)
+            machineStates[state.name] = state
+        map(_addState, statesList)
 
-        # otherwise simply use the cached currentConfig etc.
-        # 
-        else:
-            self.config = FSM._CURRENT_CONFIG
-            self.machines = FSM._MACHINES
-            self.pseudoInits = FSM._PSEUDO_INITS
-            self.pseudoFinals = FSM._PSEUDO_FINALS
-    def _init(self, name, statesList, transitionsList, currentConfig=None):
-        """ Constructs a group of singleton States and Transitions from the machineConfig
-
-        @param name             : FSM machine name
-        @param statesList       : all states of this FSM
-        @param transitionList   : all transition of this FSM
-        @param currentConfig: a config._Configuration instance (dependency injection). if None,
-            then the factory uses config.currentConfiguration()
-        """
-        import logging
-        logging.info("Initializing FSM machine.")
-
-        self.config = currentConfig or config.currentConfiguration()
-        
-        self.machines = {}
-        self.pseudoInits, self.pseudoFinals = {}, {}
-        #for machineConfig in self.config.machines.values():
-            # initial one machines one time 
-            # machine looks like {'states'      : {'stateName1': stateObj1,
-            #                                      'stateName2': stateObj2},
-            #                     'transitions' : {'transitionName1': transObj1,
-            #                                      'transitionName2': transObj2}}
-            FSM.machines[name] = {constants.MACHINE_STATES_ATTRIBUTE: {},
-                                  constants.MACHINE_TRANSITIONS_ATTRIBUTE: {}}
-            #self.machines[name] = {constants.MACHINE_STATES_ATTRIBUTE: {},
-            #                     constants.MACHINE_TRANSITIONS_ATTRIBUTE: {}}
- 
-            machine = self.machines[machineConfig.name]
-
-            # create a pseudo-init state for each machine that transitions to the initialState
-            pseudoInit = State(FSM.PSEUDO_INIT, None, None, None)
-            self.pseudoInits[machineConfig.name] = pseudoInit
-            self.machines[machineConfig.name][constants.MACHINE_STATES_ATTRIBUTE][FSM.PSEUDO_INIT] = pseudoInit
-
-            # create a pseudo-final state for each machine that transitions from the finalState(s)
-            pseudoFinal = State(FSM.PSEUDO_FINAL, None, None, None, isFinalState=True)
-            self.pseudoFinals[machineConfig.name] = pseudoFinal
-            self.machines[machineConfig.name][constants.MACHINE_STATES_ATTRIBUTE][FSM.PSEUDO_FINAL] = pseudoFinal
-
-            # add states to FSM.machines
-            map(lambda state: FSM.machines[name][state.name] = state, statesList)
-
-            # add transition to FSM.machines
-            stateDict = FSM.machines[name][constants.MACHINE_STATES_ATTRIBUTE]
-            transDict = FSM.machines[name][constants.MACHINE_TRANSITIONS_ATTRIBUTE]
-            def _addTranstion(stateDict, transDict, transition):
-                transDict[transition.name]      = transition
-                stateDict[transition.source].addTransition(transition, transition.event) 
-            map(_addTranstion, transitionsList)
-
-            for stateConfig in machineConfig.states.values():
-                state = self._getState(machineConfig, stateConfig)
-
-                # add the transition from pseudo-init to initialState
-                if state.isInitialState:
-                    # transite from PSEUDO_INIT to initial state
-                    transition = Transition(FSM.PSEUDO_INIT, state,
-                                            retryOptions = self._buildRetryOptions(machineConfig),
-                                            queueName=machineConfig.queueName)
-                    self.pseudoInits[machineConfig.name].addTransition(transition, FSM.PSEUDO_INIT)
-
-                # add the transition from finalState to pseudo-final
-                if state.isFinalState:
-                    transition = Transition(FSM.PSEUDO_FINAL, pseudoFinal,
-                                            retryOptions = self._buildRetryOptions(machineConfig),
-                                            queueName=machineConfig.queueName)
-                    state.addTransition(transition, FSM.PSEUDO_FINAL)
-
-                machine[constants.MACHINE_STATES_ATTRIBUTE][stateConfig.name] = state
-
-'''
-            for transitionConfig in machineConfig.transitions.values():
-                source = machine[constants.MACHINE_STATES_ATTRIBUTE][transitionConfig.fromState.name]
-                transition = self._getTransition(machineConfig, transitionConfig)
-                machine[constants.MACHINE_TRANSITIONS_ATTRIBUTE][transitionConfig.name] = transition
-                event = transitionConfig.event
-                source.addTransition(transition, event)
-'''
-    def load
-    def _getState(self, machineConfig, stateConfig):
-        """ Returns a State instance based on the machineConfig/stateConfig
-
-        @param machineConfig: a config._MachineConfig instance
-        @param stateConfig: a config._StateConfig instance
-        @return: a State instance which is a singleton wrt. the FSM instance
-        """
-
-        if machineConfig.name in self.machines and \
-           stateConfig.name in self.machines[machineConfig.name][constants.MACHINE_STATES_ATTRIBUTE]:
-            return self.machines[machineConfig.name][constants.MACHINE_STATES_ATTRIBUTE][stateConfig.name]
-
-        name = stateConfig.name
-        entryAction = stateConfig.entry
-        doAction = stateConfig.action
-        exitAction = stateConfig.exit
-        isInitialState = stateConfig.initial
-        isFinalState = stateConfig.final
-        isContinuation = stateConfig.continuation
-        continuationCountdown = stateConfig.continuationCountdown
-        fanInPeriod = stateConfig.fanInPeriod
-        fanInGroup = stateConfig.fanInGroup
-
-        return State(name,
-                     entryAction,
-                     doAction,
-                     exitAction,
-                     machineName=machineConfig.name,
-                     isInitialState=isInitialState,
-                     isFinalState=isFinalState,
-                     isContinuation=isContinuation,
-                     fanInPeriod=fanInPeriod,
-                     fanInGroup=fanInGroup,
-                     continuationCountdown=continuationCountdown)
-
-    def _getTransition(self, machineConfig, transitionConfig):
-        """ Returns a Transition instance based on the machineConfig/transitionConfig
-
-        @param machineConfig: a config._MachineConfig instance
-        @param transitionConfig: a config._TransitionConfig instance
-        @return: a Transition instance which is a singleton wrt. the FSM instance
-        """
-        if machineConfig.name in self.machines and \
-           transitionConfig.name in self.machines[machineConfig.name][constants.MACHINE_TRANSITIONS_ATTRIBUTE]:
-            return self.machines[machineConfig.name][constants.MACHINE_TRANSITIONS_ATTRIBUTE][transitionConfig.name]
-
-        target = self.machines[machineConfig.name][constants.MACHINE_STATES_ATTRIBUTE][transitionConfig.toState.name]
-        retryOptions = self._buildRetryOptions(transitionConfig)
-        countdown = transitionConfig.countdown
-        queueName = transitionConfig.queueName
-        taskTarget = transitionConfig.target
-
-        return Transition(transitionConfig.name, target, action=transitionConfig.action,
-                          countdown=countdown, retryOptions=retryOptions, queueName=queueName, taskTarget=taskTarget)
+        # add transition to FSM.machines
+        def _addTranstion(transition):
+            machineTrans[transition.name] = transition
+            machineStates[transition.source.name].addTransition(transition, transition.event) 
+        map(_addTranstion, transList)
 
     def createFSMInstance(self, machineName, currentStateName=None, instanceName=None, data=None, method='GET',
-                          obj=None, headers=None):
+                          obj=None):
         """ Creates an FSMContext instance with non-initialized data
 
         @param machineName: the name of FSMContext to instantiate, as defined in fsm.yaml
@@ -268,42 +109,28 @@ class FSM(object):
         """
 
         try:
-            machineConfig = self.config.machines[machineName]
+            machine = FSM.machines[machineName]
         except KeyError:
             raise UnknownMachineError(machineName)
 
-        initialState = self.machines[machineName][constants.MACHINE_STATES_ATTRIBUTE][machineConfig.initialState.name]
-
+        initialState = machine[constants.MACHINE_STATES_ATTRIBUTE][FSM.FSM_INIT_STATE]
+        
         try:
-            currentState = self.pseudoInits[machineName]
+            currentState = initialState
             if currentStateName:
-                currentState = self.machines[machineName][constants.MACHINE_STATES_ATTRIBUTE][currentStateName]
+                currentState = machine[constants.MACHINE_STATES_ATTRIBUTE][currentStateName]
         except KeyError:
             raise UnknownStateError(machineName, currentStateName)
 
-        retryOptions = self._buildRetryOptions(machineConfig)
-        url = machineConfig.url
-        queueName = machineConfig.queueName
-        taskTarget = machineConfig.target
-        useRunOnceSemaphore = machineConfig.useRunOnceSemaphore
-
         return FSMContext(initialState, currentState=currentState,
                           machineName=machineName, instanceName=instanceName,
-                          retryOptions=retryOptions, url=url, queueName=queueName,
-                          data=data, contextTypes=machineConfig.contextTypes,
-                          method=method,
-                          persistentLogging=(machineConfig.logging == constants.LOGGING_PERSISTENT),
-                          obj=obj,
-                          headers=headers,
-                          globalTaskTarget=taskTarget,
-                          useRunOnceSemaphore=useRunOnceSemaphore)
+                          data=data, obj=obj)
+                        
 class FSMContext(dict):
     """ A finite state machine context instance. """
 
     def __init__(self, initialState, currentState=None, machineName=None, instanceName=None,
-                 retryOptions=None, url=None, queueName=None, data=None, contextTypes=None,
-                 method='GET', persistentLogging=False, obj=None, headers=None, globalTaskTarget=None,
-                 useRunOnceSemaphore=True):
+                 data=None, obj=None):
         """ Constructor
 
         @param initialState: a State instance
@@ -328,24 +155,11 @@ class FSMContext(dict):
             self.currentAction = currentState.exitAction
         self.machineName = machineName
         self.instanceName = instanceName or self._generateUniqueInstanceName()
-        self.queueName = queueName
-        self.retryOptions = retryOptions
-        self.url = url
-        self.method = method
+
         self.startingEvent = None
         self.startingState = None
-        self.contextTypes = constants.PARAM_TYPES.copy()
-        if contextTypes:
-            self.contextTypes.update(contextTypes)
-        self.logger = Logger(self, obj=obj, persistentLogging=persistentLogging)
-        self.__obj = obj
-        self.headers = headers
-        self.globalTaskTarget = globalTaskTarget
-        self.useRunOnceSemaphore = useRunOnceSemaphore
 
-        # the following is monkey-patched from handler.py for 'immediate mode'
-        from google.appengine.api.taskqueue.taskqueue import Queue
-        self.Queue = Queue # pylint: disable-msg=C0103
+        self.__obj = obj
 
     INSTANCE_NAME_DTFORMAT = '%Y%m%d%H%M%S'
 
@@ -455,3 +269,4 @@ class FSMContext(dict):
             self._handleException(event, obj)
 
         return nextEvent
+        '''

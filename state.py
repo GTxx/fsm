@@ -16,21 +16,19 @@ Copyright 2010 VendAsta Technologies Inc.
    See the License for the specific language governing permissions and
    limitations under the License.
 """
-from google.appengine.api.taskqueue.taskqueue import Task, TaskAlreadyExistsError, TombstonedTaskError
 
-from fantasm import constants
+from hxfsm import constants
 from hxfsm.transition import Transition
-from fantasm.exceptions import UnknownEventError, InvalidEventNameRuntimeError, FanInNoContextsAvailableRuntimeError, \
-                               TRANSIENT_ERRORS, HaltMachineError
-from fantasm.utils import knuthHash
-from fantasm.lock import RunOnceSemaphore
+from hxfsm.exceptions import UnknownEventError, InvalidEventNameRuntimeError, FanInNoContextsAvailableRuntimeError, \
+                               HaltMachineError
+#from fantasm.utils import knuthHash
+#from fantasm.lock import RunOnceSemaphore
 
 class State(object):
     """ A state object for a machine. """
 
-    def __init__(self, NAME_RE, entryAction, doAction, exitAction, machineName=None,
-                 isFinalState=False, isInitialState=False, isContinuation=False, fanInPeriod=constants.NO_FAN_IN,
-                 fanInGroup=None, continuationCountdown=0):
+    def __init__(self, name, entryAction=None, doAction=None, exitAction=None, machineName=None,
+                 isFinalState=False, isInitialState=False):
         """
         @param name: the name of the State instance
         @param entryAction: an FSMAction instance
@@ -44,8 +42,6 @@ class State(object):
         @param fanInGroup: name of value in context to use for grouping fan-in tasks.
         @param continuationCountdown: the number of seconds to countdown when executing a continuation task
         """
-        assert not (exitAction and isContinuation) # TODO: revisit this with jcollins, we want to get it right
-        assert not (exitAction and fanInPeriod > constants.NO_FAN_IN) # TODO: revisit this with jcollins
 
         self.name = name
         self.entryAction = entryAction
@@ -54,11 +50,7 @@ class State(object):
         self.machineName = machineName # is this really necessary? it is only for logging.
         self.isInitialState = isInitialState
         self.isFinalState = isFinalState
-        self.isContinuation = isContinuation
-        self.continuationCountdown = continuationCountdown
-        self.isFanIn = fanInPeriod != constants.NO_FAN_IN
-        self.fanInPeriod = fanInPeriod
-        self.fanInGroup = fanInGroup
+
         self._eventToTransition = {}
 
     def addTransition(self, transition, event):
@@ -69,9 +61,6 @@ class State(object):
         """
         assert isinstance(transition, Transition)
         assert isinstance(event, basestring)
-
-        assert not (self.exitAction and transition.target.isContinuation) # TODO: revisit this with jcollins
-        assert not (self.exitAction and transition.target.isFanIn) # TODO: revisit
 
         self._eventToTransition[event] = transition
 
@@ -89,7 +78,7 @@ class State(object):
             logging.critical('Cannot find transition for event "%s". (Machine %s, State %s)',
                              event, self.machineName, self.name)
             raise UnknownEventError(event, self.machineName, self.name)
-
+'''
     def dispatch(self, context, event, obj):
         """ Fires the transition and executes the next States's entry, do and exit actions.
 
@@ -209,3 +198,4 @@ class State(object):
                                                    context.instanceName)
 
         return nextEvent
+'''
