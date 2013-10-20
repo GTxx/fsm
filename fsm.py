@@ -76,23 +76,22 @@ class FSM(object):
         machineStates   = machine[constants.MACHINE_STATES_ATTRIBUTE]
         machineTrans    = machine[constants.MACHINE_TRANSITIONS_ATTRIBUTE]
 
-        # add states to FSM.machines
-        def _addState(state):
+        # add states to FSM.machines 
+        for state in statesList:    
             # mark the initial state
             if state.isInitialState:
                 machineStates[FSM.FSM_INIT_STATE] = state
             if state.name == FSM.FSM_INIT_STATE:
                 logging.info("state name should not be %s.", FSM.FSM_INIT_STATE)
+
             machineStates[state.name] = state
-        map(_addState, statesList)
 
         # add transition to FSM.machines
-        def _addTranstion(transition):
+        for transition in transList:
             machineTrans[transition.name] = transition
             machineStates[transition.source.name].addTransition(transition, transition.event) 
-        map(_addTranstion, transList)
 
-    def createFSMInstance(self, machineName, currentStateName=None, instanceName=None, data=None, method='GET',
+    def createFSMInstance(machineName, currentStateName=None, instanceName=None, data=None, 
                           obj=None):
         """ Creates an FSMContext instance with non-initialized data
 
@@ -127,6 +126,8 @@ class FSM(object):
                           data=data, obj=obj)
                         
 class FSMContext(dict):
+
+    contexts = {}
     """ A finite state machine context instance. """
 
     def __init__(self, initialState, currentState=None, machineName=None, instanceName=None,
@@ -145,8 +146,7 @@ class FSMContext(dict):
         @param obj: an object that the FSMContext can operate on
         @param globalTaskTarget: the machine-level target configuration parameter
         """
-        assert queueName
-
+        
         super(FSMContext, self).__init__(data or {})
         self.initialState = initialState
         self.currentState = currentState
@@ -161,6 +161,9 @@ class FSMContext(dict):
 
         self.__obj = obj
 
+        FSMContext.contexts[self.instanceName] = {'initialState':initialState.name, 'currentState' : currentState.name, \
+                                             'machineName' : machineName}    # TODO: save FSMContext instance in DB.
+
     INSTANCE_NAME_DTFORMAT = '%Y%m%d%H%M%S'
 
     def _generateUniqueInstanceName(self):
@@ -174,7 +177,7 @@ class FSMContext(dict):
         # note this construction is important for getInstanceStartTime()
         return '%s-%s-%s' % (self.machineName, dateStr, randomStr)
 
-    def dispatch(self, event, obj):
+    def dispatch(self, event):
         """ The main entry point to move the machine according to an event.
 
         @param event: a string event to dispatch to the FSMContext
@@ -182,7 +185,7 @@ class FSMContext(dict):
         @return: an event string to dispatch to the FSMContext
         """
 
-        self.__obj = self.__obj or obj # hold the obj object for use during this context
+        #self.__obj = self.__obj or obj # hold the obj object for use during this context
 
         # store the starting state and event for the handleEvent() method
         self.startingState = self.currentState
@@ -190,83 +193,13 @@ class FSMContext(dict):
 
         nextEvent = None
         try:
-            nextEvent = self.currentState.dispatch(self, event, obj)
+            nextEvent = self.currentState.dispatch(self, event)
 
-            if obj.get(constants.FORKED_CONTEXTS_PARAM):
-                # pylint: disable-msg=W0212
-                # - accessing the protected method is fine here, since it is an instance of the same class
-                tasks = []
-                for context in obj[constants.FORKED_CONTEXTS_PARAM]:
-                    context[constants.STEPS_PARAM] = int(context.get(constants.STEPS_PARAM, '0')) + 1
-                    task = context.queueDispatch(nextEvent, queue=False)
-                    if task: # fan-in magic
-                        if not task.was_enqueued: # fan-in always queues
-                            tasks.append(task)
-
-                try:
-                    if tasks:
-                        transition = self.currentState.getTransition(nextEvent)
-                        _queueTasks(self.Queue, transition.queueName, tasks)
-
-                except (TaskAlreadyExistsError, TombstonedTaskError):
-                    # unlike a similar block in self.continutation, this is well off the happy path
-                    self.logger.critical(
-                                     'Unable to queue fork Tasks %s as it/they already exists. (Machine %s, State %s)',
-                                     [task.name for task in tasks if not task.was_enqueued],
-                                     self.machineName,
-                                     self.currentState.name)
-
-            if nextEvent:
-                self[constants.STEPS_PARAM] = int(self.get(constants.STEPS_PARAM, '0')) + 1
-
-                try:
-                    self.queueDispatch(nextEvent)
-
-                except (TaskAlreadyExistsError, TombstonedTaskError):
-                    # unlike a similar block in self.continutation, this is well off the happy path
-                    #
-                    # FIXME: when this happens, it means there was failure shortly after queuing the Task, or
-                    #        possibly even with queuing the Task. when this happens there is a chance that
-                    #        two states in the machine are executing simultaneously, which is may or may not
-                    #        be a good thing, depending on what each state does. gracefully handling this
-                    #        exception at least means that this state will terminate.
-                    # NOTE:  This happens most often due to oddities in the Task Queue system. E.g., task
-                    #        queue will raise an exception while doing a BulkAdd or a TransientError occurs,
-                    #        however despite this error, the task was enqueued (and the task name was
-                    #        registered in the tombstone system). That is, it seems that most often, the
-                    #        error that leads to this message does not mean that a particular machine did
-                    #        not continue; it probably always does continue. However, not that the particular
-                    #        state that issues this particular warning was triggered twice, so any side-effect
-                    #        (e.g., sending an email) would have occurred twice. Remember it is very important
-                    #        for your machine states to be idemopotent meaning they have to protect against
-                    #        this situation on their own as the task queue system itself is distributed and
-                    #        definitely not perfect.
-                    self.logger.warning('Unable to queue next Task as it already exists. (Machine %s, State %s)',
-                                     self.machineName,
-                                     self.currentState.name)
-
-            else:
-                # if we're not in a final state, emit a log message
-                # FIXME - somehow we should avoid this message if we're in the "last" step of a continuation...
-                if not self.currentState.isFinalState and not obj.get(constants.TERMINATED_PARAM):
-                    self.logger.critical('Non-final state did not emit an event. Machine has terminated in an ' +
-                                     'unknown state. (Machine %s, State %s)' %
-                                     (self.machineName, self.currentState.name))
-                # if it is a final state, then dispatch the pseudo-final event to finalize the state machine
-                elif self.currentState.isFinalState and self.currentState.exitAction:
-                    self[constants.STEPS_PARAM] = int(self.get(constants.STEPS_PARAM, '0')) + 1
-                    self.queueDispatch(FSM.PSEUDO_FINAL)
-
-        except HaltMachineError, e:
+        except HaltMachineError as e:
             if e.level is not None and e.message:
                 self.logger.log(e.level, e.message)
             return None # stop the machine
-        except Exception, e:
-            level = self.logger.error
-            if e.__class__ in TRANSIENT_ERRORS:
-                level = self.logger.warn
-            level("FSMContext.dispatch is handling the following exception:", exc_info=True)
-            self._handleException(event, obj)
+
 
         return nextEvent
-        '''
+        
